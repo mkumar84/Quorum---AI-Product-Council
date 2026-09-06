@@ -38,19 +38,73 @@ def apply_transition(db: Session, task: models.Task, to_state: str) -> None:
 
 
 def post_message(db: Session, task: models.Task, payload: schemas.MessageCreate) -> models.Message:
+    """Posts a message - but while a rejection is outstanding (task.rejected_to_agent_id
+    is set), every poster (any agent, or a human) must name exactly which critique
+    they're answering via resolves_message_id. This is what stops an unrelated
+    message from ever being mistaken for a fix: it can't even be posted without
+    deliberately linking to the critique it's responding to.
+    """
+    if task.rejected_to_agent_id is not None and payload.resolves_message_id != task.pending_critique_message_id:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                "this task has an outstanding rejection; resolves_message_id must point at "
+                f"the critique message that caused it ({task.pending_critique_message_id})"
+            ),
+        )
     message = models.Message(thread_id=task.thread_id, **payload.model_dump())
     db.add(message)
+    db.flush()  # populate message.id now - callers often need it immediately (e.g. to
+    # record it as task.pending_critique_message_id), before any explicit commit
     return message
 
 
-def advance_to_review_if_ready(db: Session, task: models.Task) -> None:
-    """in_progress -> in_review once Engineering has proposed and Risk has assigned a tier.
+# The message type that actually counts as "this role's real output" - a
+# clarifying question (critique) from PM, say, links to the rejection via
+# resolves_message_id too, but doesn't itself resolve it.
+_RESOLUTION_MESSAGE_TYPE = {
+    "pm": "contract",
+    "engineering_lead": "proposal",
+    "risk_governance": "decision",
+}
 
-    Gated on task.policy_tier rather than the presence of a 'decision'-typed
-    message: a message's type is just a label anyone (including a human) can
-    post, and the tier is the actual signal that Risk has done its job.
+
+def advance_to_review_if_ready(db: Session, task: models.Task) -> None:
+    """in_progress -> in_review, either the first time (Engineering has proposed
+    and Risk has assigned a tier) or after a rejection (the targeted agent's
+    linked resolution has landed) - clearing the rejection in the latter case.
+
+    Not gated on generic message-type presence once a rejection is outstanding:
+    that let any message from anyone re-open review without the actual defect
+    being addressed. It now requires a message that (a) links to the specific
+    critique via resolves_message_id, (b) comes from the agent it was rejected
+    to, and (c) is that role's real output type, not just an acknowledgment.
     """
-    if task.state != "in_progress" or task.policy_tier is None:
+    if task.state != "in_progress":
+        return
+
+    if task.rejected_to_agent_id is not None:
+        target_agent = db.get(models.Agent, task.rejected_to_agent_id)
+        expected_type = _RESOLUTION_MESSAGE_TYPE.get(target_agent.role) if target_agent else None
+        resolved = (
+            db.query(models.Message)
+            .filter(
+                models.Message.thread_id == task.thread_id,
+                models.Message.resolves_message_id == task.pending_critique_message_id,
+                models.Message.author_id == task.rejected_to_agent_id,
+                models.Message.message_type == expected_type,
+            )
+            .first()
+            is not None
+        )
+        if not resolved:
+            return
+        task.rejected_to_agent_id = None
+        task.pending_critique_message_id = None
+        apply_transition(db, task, "in_review")
+        return
+
+    if task.policy_tier is None:
         return
     has_proposal = (
         db.query(models.Message)
@@ -130,7 +184,7 @@ def apply_review(db: Session, task: models.Task, payload: schemas.ReviewPayload)
         )
 
     apply_transition(db, task, "in_progress")
-    return post_message(
+    message = post_message(
         db,
         task,
         schemas.MessageCreate(
@@ -141,6 +195,9 @@ def apply_review(db: Session, task: models.Task, payload: schemas.ReviewPayload)
             rejected_to_agent_id=payload.rejected_to_agent_id,
         ),
     )
+    task.rejected_to_agent_id = payload.rejected_to_agent_id
+    task.pending_critique_message_id = message.id
+    return message
 
 
 def get_task_detail(db: Session, task: models.Task) -> schemas.TaskDetailOut:

@@ -51,6 +51,13 @@ class Task(Base):
     state: Mapped[str] = mapped_column(TaskState, nullable=False, default="proposed")
     owner_agent_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("agents.id"))
     thread_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("threads.id"))
+    # Set together when the Reviewer rejects; cleared together once the targeted
+    # agent's resolving message (linked via Message.resolves_message_id) lands.
+    # Companion to messages.resolves_message_id - see migration 0003.
+    rejected_to_agent_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("agents.id"))
+    pending_critique_message_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("messages.id")
+    )
     created_at: Mapped[object] = mapped_column(TIMESTAMP(timezone=True), server_default=func.now())
     updated_at: Mapped[object] = mapped_column(
         TIMESTAMP(timezone=True), server_default=func.now(), onupdate=func.now()
@@ -85,6 +92,11 @@ class Message(Base):
     rejected_to_agent_id: Mapped[uuid.UUID | None] = mapped_column(
         UUID(as_uuid=True), ForeignKey("agents.id")
     )
+    # Set by the poster to name exactly which critique this message is
+    # answering - required whenever task.rejected_to_agent_id is set, so a
+    # message can't advance a task past a rejection without deliberately
+    # linking to it. See migration 0003.
+    resolves_message_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("messages.id"))
     created_at: Mapped[object] = mapped_column(TIMESTAMP(timezone=True), server_default=func.now())
     updated_at: Mapped[object] = mapped_column(
         TIMESTAMP(timezone=True), server_default=func.now(), onupdate=func.now()

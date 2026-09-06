@@ -12,6 +12,7 @@ pip install -r requirements.txt
 cp .env.example .env  # fill in DATABASE_URL and ANTHROPIC_API_KEY
 psql "$DATABASE_URL" -f migrations/0001_initial_schema.sql
 psql "$DATABASE_URL" -f migrations/0002_add_system_error_message_type.sql
+psql "$DATABASE_URL" -f migrations/0003_add_resolution_tracking.sql
 python seed.py         # 4 agents + 3 intake requests, no contracts yet
 uvicorn app.main:app --reload
 ```
@@ -20,6 +21,7 @@ uvicorn app.main:app --reload
 
 - `migrations/0001_initial_schema.sql` — agents, tasks, threads, messages, receipts, policy_rules
 - `migrations/0002_add_system_error_message_type.sql` — adds `system_error` to `message_type`, for automated blocking notices
+- `migrations/0003_add_resolution_tracking.sql` — adds `messages.resolves_message_id` and `tasks.rejected_to_agent_id`/`pending_critique_message_id`, so a rejection can only be cleared by a message that actually links to it (see below)
 - `app/models.py` / `app/schemas.py` — SQLAlchemy models and Pydantic schemas
 - `app/state_machine.py` — valid task state transitions
 - `app/task_service.py` — the actual lifecycle logic (transitions, message posting, contract/review application), shared by the routers, the orchestrator, and council so a human's manual call and an agent's turn go through the identical, state-machine-enforced code path
@@ -36,7 +38,7 @@ uvicorn app.main:app --reload
 | `POST /tasks` | — → `proposed` | body: `{title}` — a raw feature request, no contract |
 | `POST /tasks/{id}/contract` | `proposed` → `contracted` | manually-typed contract; body: `{pm_agent_id, objective, scope, constraints, acceptance_criteria}`. Triggers the council cascade afterward |
 | `POST /tasks/{id}/claim` | `contracted` → `in_progress` | manual claim; body: `{agent_id}`. A second claim on an already-`in_progress` task is a no-op, since both agents claim in parallel |
-| `POST /tasks/{id}/messages` | none directly, but may advance `in_progress` → `in_review` | post any thread message: `{author_type, author_id, message_type, content, rejected_to_agent_id?}`. Triggers the council cascade afterward |
+| `POST /tasks/{id}/messages` | none directly, but may advance `in_progress` → `in_review` | post any thread message: `{author_type, author_id, message_type, content, rejected_to_agent_id?, resolves_message_id?}`. **422 if the task has an outstanding rejection and `resolves_message_id` doesn't point at the critique that caused it** (see below). Triggers the council cascade afterward |
 | `POST /tasks/{id}/review` | `in_review` → `approved` or → `in_progress` | manual reviewer verdict. `verdict: "approve"` builds the receipt from the payload; `verdict: "reject"` requires `rejected_to_agent_id` and `reason` (422 if missing) and writes them onto the critique message |
 | `POST /tasks/{id}/run` | whatever that role's turn implies | body: `{role: "pm"\|"engineering"\|"risk"\|"reviewer"}` — manually trigger **one** agent's real Claude turn, in isolation from the council cascade. For debugging a single agent's output before trusting the automatic chain |
 | `GET /tasks/{id}` | — | task + full thread history + receipt (if approved) |
@@ -48,15 +50,57 @@ Rejection does not park the task in a resting `rejected` state; it goes
 straight back to `in_progress`, with the bounce (`rejected_to_agent_id` +
 the model's actual reason text) recorded on the critique message.
 
-`in_progress` → `in_review` is gated on `task.policy_tier` being set (by
-Risk) plus a `proposal` message existing (from Engineering) — not on the
-generic presence of a `decision`-typed message, since a message's type is
-just a label anyone, including a human, can post.
-
 There is currently no endpoint to move a task to `blocked` directly — it's
 only reached automatically, by an agent's Claude call failing (see below) or
 council's cascade-depth breaker tripping. Add a manual endpoint when the
 human-escalation flow (reviewing and unblocking) is built.
+
+## Resolution-linked revisions
+
+`docs/real-run-log-v3.md` found a real gap: `in_progress → in_review` used to
+fire on the generic presence of a `proposal` + a `policy_tier`, which meant
+*any* message posted while a rejection was outstanding — from anyone, about
+anything — silently re-opened review with the actual defect untouched. Worse,
+PM could never be re-invoked at all once a task had a contract, so a
+PM-targeted rejection was a dead end.
+
+Fixed by tracking the rejection explicitly, not inferring it from message
+types:
+
+- When the Reviewer rejects, `task.rejected_to_agent_id` and
+  `task.pending_critique_message_id` are set to the target agent and the
+  critique message that caused the rejection (both `apply_review` and
+  `orchestrator.run_reviewer` do this).
+- While `task.rejected_to_agent_id` is set, **every** `post_message` call —
+  from a `run_*` function or a human via the API — must set
+  `resolves_message_id` to exactly `task.pending_critique_message_id`, or
+  it's rejected with `422`. A message can't silently advance the task
+  without deliberately naming the critique it's answering.
+- `advance_to_review_if_ready` no longer gates on type-presence once a
+  rejection is outstanding. It looks for a message that (a) resolves the
+  right critique, (b) comes from the agent it was rejected to
+  (`author_id == task.rejected_to_agent_id`), and (c) is that role's real
+  output type (`contract` for PM, `proposal` for Engineering, `decision`
+  for Risk — a clarifying question doesn't count, even if linked). Only
+  then does it clear the rejection and advance. The very first pass through
+  `in_progress` (no rejection yet) still uses the original "Engineering has
+  proposed and Risk has a tier" gate — there's no critique to link to yet.
+- `run_pm` no longer hard-requires `state == "proposed"`. It accepts
+  `("proposed", "in_progress")`, same pattern as Engineering and Risk, so a
+  PM-targeted rejection has a real revision path for the first time. Its
+  contract-fields update and `proposed → contracted` transition only fire on
+  the first pass; a revision leaves `state` alone and lets
+  `advance_to_review_if_ready` decide.
+
+`tests/test_rejection_routing.py` replays task 1's exact scenario from
+`real-run-log-v3.md` (needs `DATABASE_URL` pointed at a migrated + seeded
+Postgres, no `ANTHROPIC_API_KEY` needed — Claude calls are monkeypatched):
+posting the literal unrelated message from that log (`"just checking in on
+this one"`) is now rejected with `422` and leaves the task untouched; a
+correctly-linked PM revision advances it to `in_review` and clears the
+rejection; and a PM clarifying question that reuses the same
+`resolves_message_id` does *not* count as a resolution, since it isn't a
+`contract`-type message.
 
 ## Agent-call retries and blocking on failure
 

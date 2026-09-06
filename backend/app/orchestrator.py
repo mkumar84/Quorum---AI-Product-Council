@@ -179,8 +179,11 @@ CONTRACT_FORMAT_INSTRUCTION = (
 
 
 def run_pm(db: Session, task: models.Task) -> models.Message:
-    """proposed -> contracted (or stays proposed with a clarifying question)."""
-    _require_state(task, "proposed")
+    """proposed -> contracted (or stays proposed with a clarifying question);
+    or, if PM is the target of an outstanding rejection, in_progress -> in_review
+    once its revised contract is posted - same re-entry pattern as the other
+    three agents, no longer a one-shot-only intake step."""
+    _require_state(task, "proposed", "in_progress")
     agent = task_service.get_agent_by_role(db, "pm")
     try:
         reply = _run_or_block(
@@ -196,16 +199,25 @@ def run_pm(db: Session, task: models.Task) -> models.Message:
         task.scope = fields.get("scope") or task.scope
         task.constraints = fields.get("constraints") or task.constraints
         task.acceptance_criteria = fields.get("acceptance_criteria") or task.acceptance_criteria
-        task_service.apply_transition(db, task, "contracted")
+        if task.state == "proposed":
+            task_service.apply_transition(db, task, "contracted")
         message_type = "contract"
     else:
         message_type = "critique"
 
+    resolves_message_id = task.pending_critique_message_id if task.rejected_to_agent_id else None
     message = task_service.post_message(
         db,
         task,
-        schemas.MessageCreate(author_type="agent", author_id=agent.id, message_type=message_type, content=reply),
+        schemas.MessageCreate(
+            author_type="agent",
+            author_id=agent.id,
+            message_type=message_type,
+            content=reply,
+            resolves_message_id=resolves_message_id,
+        ),
     )
+    task_service.advance_to_review_if_ready(db, task)
     db.commit()
     db.refresh(message)
     return message
@@ -221,10 +233,17 @@ def run_engineering(db: Session, task: models.Task) -> models.Message:
         reply = _run_or_block(db, task, agent, get_system_prompt("engineering_lead"), _build_context(db, task))
     except _Blocked as blocked:
         return blocked.message
+    resolves_message_id = task.pending_critique_message_id if task.rejected_to_agent_id else None
     message = task_service.post_message(
         db,
         task,
-        schemas.MessageCreate(author_type="agent", author_id=agent.id, message_type="proposal", content=reply),
+        schemas.MessageCreate(
+            author_type="agent",
+            author_id=agent.id,
+            message_type="proposal",
+            content=reply,
+            resolves_message_id=resolves_message_id,
+        ),
     )
     task_service.advance_to_review_if_ready(db, task)
     db.commit()
@@ -252,10 +271,17 @@ def run_risk(db: Session, task: models.Task) -> models.Message:
         )
     except _Blocked as blocked:
         return blocked.message
+    resolves_message_id = task.pending_critique_message_id if task.rejected_to_agent_id else None
     message = task_service.post_message(
         db,
         task,
-        schemas.MessageCreate(author_type="agent", author_id=agent.id, message_type="decision", content=reply),
+        schemas.MessageCreate(
+            author_type="agent",
+            author_id=agent.id,
+            message_type="decision",
+            content=reply,
+            resolves_message_id=resolves_message_id,
+        ),
     )
 
     first_line = reply.strip().splitlines()[0].strip() if reply.strip() else ""
@@ -338,6 +364,8 @@ def run_reviewer(db: Session, task: models.Task) -> models.Message:
                 rejected_to_agent_id=rejected_to_agent_id,
             ),
         )
+        task.rejected_to_agent_id = rejected_to_agent_id
+        task.pending_critique_message_id = message.id
 
     db.commit()
     db.refresh(message)

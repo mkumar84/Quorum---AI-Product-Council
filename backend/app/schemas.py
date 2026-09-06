@@ -39,6 +39,8 @@ class TaskOut(BaseModel):
     state: str
     owner_agent_id: uuid.UUID | None
     thread_id: uuid.UUID | None
+    rejected_to_agent_id: uuid.UUID | None
+    pending_critique_message_id: uuid.UUID | None
     created_at: datetime.datetime
     updated_at: datetime.datetime
 
@@ -49,6 +51,7 @@ class MessageCreate(BaseModel):
     message_type: Literal["contract", "proposal", "critique", "decision", "receipt", "system_error"]
     content: str
     rejected_to_agent_id: uuid.UUID | None = None
+    resolves_message_id: uuid.UUID | None = None
 
 
 class MessageOut(MessageCreate):

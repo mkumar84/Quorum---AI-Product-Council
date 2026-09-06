@@ -29,6 +29,14 @@ from .prompts import get_system_prompt
 
 MODEL = os.environ.get("ANTHROPIC_MODEL", "claude-sonnet-5")
 
+# 4096 was too low: Sonnet 5 runs adaptive thinking by default, thinking tokens count
+# against max_tokens, and a long thread (several rejection/revision rounds) can leave
+# too little - or nothing - for the actual visible reply. Confirmed directly against
+# the API: a real call returned stop_reason="max_tokens" with thinking_tokens=3559 of
+# a 4096 budget and zero visible text. 16000 is the API guidance's own non-streaming
+# default and leaves real headroom even with thinking eating a few thousand tokens.
+MAX_TOKENS = 16000
+
 MAX_CLAUDE_RETRIES = 2
 RETRY_BACKOFF_SECONDS = [1, 4]  # one entry per retry (not per attempt) - 1s, then 4s
 
@@ -42,11 +50,22 @@ def _get_client() -> anthropic.Anthropic:
     return _client
 
 
+class ClaudeResponseTruncated(RuntimeError):
+    """Raised when the API cut the response off at max_tokens - the SDK doesn't
+    raise for this itself (it's a normal stop_reason), but a truncated reply is
+    not a usable one for us: it can come back with no visible text at all if
+    thinking consumed the whole budget, and even a partial verdict/JSON block is
+    unsafe to parse. Subject to the same retry-then-block handling as any other
+    failed call - a fresh attempt gets a fresh (and, empirically, often
+    sufficient) thinking-token budget.
+    """
+
+
 def _call_claude(system_prompt: str, user_content: str) -> str:
     try:
         response = _get_client().messages.create(
             model=MODEL,
-            max_tokens=4096,
+            max_tokens=MAX_TOKENS,
             system=system_prompt,
             messages=[{"role": "user", "content": user_content}],
         )
@@ -64,6 +83,13 @@ def _call_claude(system_prompt: str, user_content: str) -> str:
         # e.g. no credentials configured at all - the SDK raises a plain TypeError
         # from header validation before any request is attempted, not an API error.
         raise HTTPException(status_code=502, detail=f"Claude API call failed: {exc}") from exc
+
+    if response.stop_reason == "max_tokens":
+        thinking_tokens = getattr(response.usage.output_tokens_details, "thinking_tokens", None)
+        raise ClaudeResponseTruncated(
+            f"response truncated at max_tokens={MAX_TOKENS} "
+            f"(thinking_tokens={thinking_tokens}, output_tokens={response.usage.output_tokens})"
+        )
 
     return "".join(block.text for block in response.content if block.type == "text")
 

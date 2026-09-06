@@ -1,5 +1,7 @@
 -- Quorum — AI Product Council
--- Postgres schema (build spec section 1)
+-- Migration 0001: initial schema (build spec section 1)
+
+CREATE EXTENSION IF NOT EXISTS pgcrypto;
 
 CREATE TYPE agent_status AS ENUM ('green', 'yellow', 'gray', 'orange');
 CREATE TYPE policy_tier AS ENUM ('auto', 'approval_required', 'prohibited');
@@ -16,7 +18,8 @@ CREATE TABLE agents (
     role TEXT NOT NULL,
     status agent_status NOT NULL DEFAULT 'green',
     runtime TEXT NOT NULL DEFAULT 'claude',
-    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
 CREATE TABLE tasks (
@@ -36,7 +39,9 @@ CREATE TABLE tasks (
 
 CREATE TABLE threads (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    task_id UUID NOT NULL REFERENCES tasks(id)
+    task_id UUID NOT NULL REFERENCES tasks(id),
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
 ALTER TABLE tasks
@@ -49,7 +54,10 @@ CREATE TABLE messages (
     author_id UUID,
     message_type message_type NOT NULL,
     content TEXT NOT NULL,
-    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+    -- set only on a Reviewer rejection: which agent the task bounces back to.
+    rejected_to_agent_id UUID REFERENCES agents(id),
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
 CREATE TABLE receipts (
@@ -62,14 +70,18 @@ CREATE TABLE receipts (
     risks TEXT[] NOT NULL DEFAULT '{}',
     approval_needed TEXT[] NOT NULL DEFAULT '{}',
     decided_by UUID REFERENCES agents(id),
-    decided_at TIMESTAMPTZ
+    decided_at TIMESTAMPTZ,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
 CREATE TABLE policy_rules (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     action_type TEXT NOT NULL,
     tier policy_tier NOT NULL,
-    rationale TEXT
+    rationale TEXT,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
 CREATE INDEX idx_tasks_state ON tasks(state);

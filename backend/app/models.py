@@ -33,6 +33,9 @@ class Agent(Base):
     status: Mapped[str] = mapped_column(AgentStatus, nullable=False, default="green")
     runtime: Mapped[str] = mapped_column(Text, nullable=False, default="claude")
     created_at: Mapped[object] = mapped_column(TIMESTAMP(timezone=True), server_default=func.now())
+    updated_at: Mapped[object] = mapped_column(
+        TIMESTAMP(timezone=True), server_default=func.now(), onupdate=func.now()
+    )
 
 
 class Task(Base):
@@ -61,6 +64,10 @@ class Thread(Base):
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     task_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("tasks.id"), nullable=False)
+    created_at: Mapped[object] = mapped_column(TIMESTAMP(timezone=True), server_default=func.now())
+    updated_at: Mapped[object] = mapped_column(
+        TIMESTAMP(timezone=True), server_default=func.now(), onupdate=func.now()
+    )
 
     task: Mapped["Task"] = relationship(back_populates="thread", foreign_keys=[Task.thread_id])
     messages: Mapped[list["Message"]] = relationship(back_populates="thread")
@@ -75,7 +82,13 @@ class Message(Base):
     author_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))
     message_type: Mapped[str] = mapped_column(MessageType, nullable=False)
     content: Mapped[str] = mapped_column(Text, nullable=False)
+    rejected_to_agent_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("agents.id")
+    )
     created_at: Mapped[object] = mapped_column(TIMESTAMP(timezone=True), server_default=func.now())
+    updated_at: Mapped[object] = mapped_column(
+        TIMESTAMP(timezone=True), server_default=func.now(), onupdate=func.now()
+    )
 
     thread: Mapped["Thread"] = relationship(back_populates="messages")
 
@@ -93,6 +106,10 @@ class Receipt(Base):
     approval_needed: Mapped[list[str]] = mapped_column(ARRAY(Text), nullable=False, default=list)
     decided_by: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("agents.id"))
     decided_at: Mapped[object | None] = mapped_column(TIMESTAMP(timezone=True))
+    created_at: Mapped[object] = mapped_column(TIMESTAMP(timezone=True), server_default=func.now())
+    updated_at: Mapped[object] = mapped_column(
+        TIMESTAMP(timezone=True), server_default=func.now(), onupdate=func.now()
+    )
 
 
 class PolicyRule(Base):
@@ -102,3 +119,7 @@ class PolicyRule(Base):
     action_type: Mapped[str] = mapped_column(Text, nullable=False)
     tier: Mapped[str] = mapped_column(PolicyTier, nullable=False)
     rationale: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[object] = mapped_column(TIMESTAMP(timezone=True), server_default=func.now())
+    updated_at: Mapped[object] = mapped_column(
+        TIMESTAMP(timezone=True), server_default=func.now(), onupdate=func.now()
+    )

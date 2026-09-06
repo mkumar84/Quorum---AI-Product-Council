@@ -94,6 +94,10 @@ class ClaimPayload(BaseModel):
     agent_id: uuid.UUID
 
 
+class RunAgentPayload(BaseModel):
+    role: Literal["pm", "engineering", "risk", "reviewer"]
+
+
 class ReviewPayload(BaseModel):
     """Manually-typed stand-in for the Reviewer's verdict (build spec step 2)."""
 

@@ -11,7 +11,7 @@ DATABASE_URL = os.environ.get(
 )
 
 engine = create_engine(DATABASE_URL)
-SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+SessionLocal = sessionmaker(autocommit=False, autoflush=True, bind=engine)
 
 
 class Base(DeclarativeBase):

@@ -18,6 +18,7 @@ import datetime
 import json
 import os
 import re
+import time
 
 import anthropic
 from fastapi import HTTPException
@@ -27,6 +28,9 @@ from . import models, schemas, task_service
 from .prompts import get_system_prompt
 
 MODEL = os.environ.get("ANTHROPIC_MODEL", "claude-sonnet-5")
+
+MAX_CLAUDE_RETRIES = 2
+RETRY_BACKOFF_SECONDS = [1, 4]  # one entry per retry (not per attempt) - 1s, then 4s
 
 _client: anthropic.Anthropic | None = None
 
@@ -62,6 +66,64 @@ def _call_claude(system_prompt: str, user_content: str) -> str:
         raise HTTPException(status_code=502, detail=f"Claude API call failed: {exc}") from exc
 
     return "".join(block.text for block in response.content if block.type == "text")
+
+
+class ClaudeCallFailed(Exception):
+    """Raised by _call_claude_with_retries when every attempt, retries included, failed."""
+
+
+def _call_claude_with_retries(system_prompt: str, user_content: str) -> str:
+    """At most MAX_CLAUDE_RETRIES retries (so MAX_CLAUDE_RETRIES + 1 attempts total),
+    with exponential backoff between attempts - not unbounded retrying."""
+    last_exc: Exception | None = None
+    for attempt in range(MAX_CLAUDE_RETRIES + 1):
+        try:
+            return _call_claude(system_prompt, user_content)
+        except Exception as exc:
+            last_exc = exc
+            if attempt < MAX_CLAUDE_RETRIES:
+                time.sleep(RETRY_BACKOFF_SECONDS[attempt])
+    raise ClaudeCallFailed(
+        f"Claude call failed after {MAX_CLAUDE_RETRIES + 1} attempts: {last_exc}"
+    ) from last_exc
+
+
+class _Blocked(Exception):
+    """Internal signal: the agent's Claude call exhausted its retries, and the
+    task has already been logged + transitioned to blocked. Each run_* function
+    catches this once and returns the system_error message instead of raising -
+    a failed agent call is a handled outcome, not a crash."""
+
+    def __init__(self, message: "models.Message"):
+        self.message = message
+
+
+def _run_or_block(
+    db: Session, task: models.Task, agent: models.Agent, system_prompt: str, user_content: str
+) -> str:
+    """Calls Claude with retries; on exhaustion, blocks the task and raises _Blocked
+    (caught by the calling run_* function, which returns the logged message)."""
+    try:
+        return _call_claude_with_retries(system_prompt, user_content)
+    except ClaudeCallFailed as exc:
+        message = task_service.post_message(
+            db,
+            task,
+            schemas.MessageCreate(
+                author_type="agent",
+                author_id=agent.id,
+                message_type="system_error",
+                content=(
+                    f"[agent-call-failed] {agent.role} agent's Claude call failed after "
+                    f"{MAX_CLAUDE_RETRIES + 1} attempts (initial + {MAX_CLAUDE_RETRIES} retries "
+                    f"with backoff) and was not retried further: {exc}"
+                ),
+            ),
+        )
+        task_service.apply_transition(db, task, "blocked")
+        db.commit()
+        db.refresh(message)
+        raise _Blocked(message) from exc
 
 
 def _thread_transcript(db: Session, thread_id) -> str:
@@ -120,7 +182,12 @@ def run_pm(db: Session, task: models.Task) -> models.Message:
     """proposed -> contracted (or stays proposed with a clarifying question)."""
     _require_state(task, "proposed")
     agent = task_service.get_agent_by_role(db, "pm")
-    reply = _call_claude(get_system_prompt("pm"), _build_context(db, task) + CONTRACT_FORMAT_INSTRUCTION)
+    try:
+        reply = _run_or_block(
+            db, task, agent, get_system_prompt("pm"), _build_context(db, task) + CONTRACT_FORMAT_INSTRUCTION
+        )
+    except _Blocked as blocked:
+        return blocked.message
     ready = reply.strip().upper().startswith("CONTRACT: READY")
 
     if ready:
@@ -150,7 +217,10 @@ def run_engineering(db: Session, task: models.Task) -> models.Message:
     agent = task_service.get_agent_by_role(db, "engineering_lead")
     task_service.claim(db, task, agent.id)
 
-    reply = _call_claude(get_system_prompt("engineering_lead"), _build_context(db, task))
+    try:
+        reply = _run_or_block(db, task, agent, get_system_prompt("engineering_lead"), _build_context(db, task))
+    except _Blocked as blocked:
+        return blocked.message
     message = task_service.post_message(
         db,
         task,
@@ -176,7 +246,12 @@ def run_risk(db: Session, task: models.Task) -> models.Message:
     agent = task_service.get_agent_by_role(db, "risk_governance")
     task_service.claim(db, task, agent.id)
 
-    reply = _call_claude(get_system_prompt("risk_governance"), _build_context(db, task) + TIER_FORMAT_INSTRUCTION)
+    try:
+        reply = _run_or_block(
+            db, task, agent, get_system_prompt("risk_governance"), _build_context(db, task) + TIER_FORMAT_INSTRUCTION
+        )
+    except _Blocked as blocked:
+        return blocked.message
     message = task_service.post_message(
         db,
         task,
@@ -208,7 +283,12 @@ def run_reviewer(db: Session, task: models.Task) -> models.Message:
     """in_review -> approved (+ receipt) | in_progress (rejected, bounced to an agent)."""
     _require_state(task, "in_review")
     agent = task_service.get_agent_by_role(db, "reviewer")
-    reply = _call_claude(get_system_prompt("reviewer"), _build_context(db, task) + REVIEW_FORMAT_INSTRUCTION)
+    try:
+        reply = _run_or_block(
+            db, task, agent, get_system_prompt("reviewer"), _build_context(db, task) + REVIEW_FORMAT_INSTRUCTION
+        )
+    except _Blocked as blocked:
+        return blocked.message
     lines = reply.strip().splitlines()
     approved = bool(lines) and lines[0].strip().upper().startswith("VERDICT: APPROVED")
 

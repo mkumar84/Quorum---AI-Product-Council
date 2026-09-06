@@ -11,13 +11,15 @@ an actual Claude call through `orchestrator.py`.
 pip install -r requirements.txt
 cp .env.example .env  # fill in DATABASE_URL and ANTHROPIC_API_KEY
 psql "$DATABASE_URL" -f migrations/0001_initial_schema.sql
-python seed.py         # 4 agents + 3 raw feature requests, no contracts yet
+psql "$DATABASE_URL" -f migrations/0002_add_system_error_message_type.sql
+python seed.py         # 4 agents + 3 intake requests, no contracts yet
 uvicorn app.main:app --reload
 ```
 
 ## Layout
 
 - `migrations/0001_initial_schema.sql` — agents, tasks, threads, messages, receipts, policy_rules
+- `migrations/0002_add_system_error_message_type.sql` — adds `system_error` to `message_type`, for automated blocking notices
 - `app/models.py` / `app/schemas.py` — SQLAlchemy models and Pydantic schemas
 - `app/state_machine.py` — valid task state transitions
 - `app/task_service.py` — the actual lifecycle logic (transitions, message posting, contract/review application), shared by the routers, the orchestrator, and council so a human's manual call and an agent's turn go through the identical, state-machine-enforced code path
@@ -51,9 +53,36 @@ Risk) plus a `proposal` message existing (from Engineering) — not on the
 generic presence of a `decision`-typed message, since a message's type is
 just a label anyone, including a human, can post.
 
-There is currently no endpoint to move a task to `blocked` (the escalation
-state) — not in this pass's scope; add one when the human-escalation flow is
-built.
+There is currently no endpoint to move a task to `blocked` directly — it's
+only reached automatically, by an agent's Claude call failing (see below) or
+council's cascade-depth breaker tripping. Add a manual endpoint when the
+human-escalation flow (reviewing and unblocking) is built.
+
+## Agent-call retries and blocking on failure
+
+Each `run_*` function's Claude call goes through `_call_claude_with_retries`:
+up to `MAX_CLAUDE_RETRIES` (2) retries with exponential backoff
+(`RETRY_BACKOFF_SECONDS` = `[1, 4]`) — 3 attempts total, not unbounded. If
+every attempt fails, the task doesn't crash or dangle: a `system_error`
+message tagged `[agent-call-failed]` (naming the role and the underlying
+error) is posted to the thread, and the task transitions to `blocked` — a
+handled outcome each `run_*` function returns normally from, not an
+exception council or the `/run` endpoint has to catch.
+
+`council.py`'s cascade-depth breaker (`MAX_DEPTH`, a defensive guard against
+a reject/revise loop that never settles — unreachable in normal operation
+now that a failed agent call blocks rather than looping) does the same:
+`system_error` tagged `[cascade-depth-exceeded]`, then blocked. One state,
+two possible causes, both greppable in the thread by their tag.
+
+`tests/test_orchestrator_retry.py` (`python -m unittest
+tests.test_orchestrator_retry`, needs `DATABASE_URL` pointed at a migrated +
+seeded Postgres, no `ANTHROPIC_API_KEY` needed) monkeypatches `_call_claude`
+to always raise and asserts: exactly 3 attempts, the `[1, 4]` backoff
+schedule, the task ends up `blocked`, exactly one `system_error` message
+exists, and — the actual point of the test — `council.on_task_updated`
+itself never raises, even though the agent call underneath it never
+succeeds.
 
 ## How an agent's turn differs from a manual call
 

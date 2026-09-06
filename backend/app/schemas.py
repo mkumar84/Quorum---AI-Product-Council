@@ -46,7 +46,7 @@ class TaskOut(BaseModel):
 class MessageCreate(BaseModel):
     author_type: Literal["agent", "human"]
     author_id: uuid.UUID | None = None
-    message_type: Literal["contract", "proposal", "critique", "decision", "receipt"]
+    message_type: Literal["contract", "proposal", "critique", "decision", "receipt", "system_error"]
     content: str
     rejected_to_agent_id: uuid.UUID | None = None
 

@@ -20,7 +20,7 @@ TaskState = Enum(
 )
 AuthorType = Enum("agent", "human", name="author_type")
 MessageType = Enum(
-    "contract", "proposal", "critique", "decision", "receipt", name="message_type"
+    "contract", "proposal", "critique", "decision", "receipt", "system_error", name="message_type"
 )
 
 

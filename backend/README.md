@@ -17,6 +17,18 @@ python seed.py         # 4 agents + 3 intake requests, no contracts yet
 uvicorn app.main:app --reload
 ```
 
+## Deploying to Railway
+
+1. **New project → Deploy from GitHub repo**, pick this repo.
+2. **Set the service's Root Directory to `backend`** (Settings → Root Directory) — the app, `requirements.txt`, `Procfile`, and `railway.json` all live there, not at the repo root.
+3. **Add a Postgres plugin** (New → Database → PostgreSQL) to the project. Railway injects `DATABASE_URL` into the web service automatically; `app/database.py` normalizes Railway's `postgres://`/`postgresql://` scheme to `postgresql+psycopg2://` itself, so no manual edit is needed.
+4. **Set environment variables** on the web service: `ANTHROPIC_API_KEY` (required for any endpoint that calls Claude), optionally `ANTHROPIC_MODEL` (defaults to `claude-sonnet-5`) and `CORS_ALLOWED_ORIGINS` (comma-separated list; defaults to `*` — tighten this once the frontend's real domain exists).
+5. **Run the migrations once** against the provisioned database, in order, before the first request that touches the DB — Railway's Postgres plugin isn't auto-migrated. From the Railway CLI, linked to the project: `railway run psql "$DATABASE_URL" -f migrations/0001_initial_schema.sql`, then `...0002...`, then `...0003...` (each is idempotent-ish but not designed to be re-run after the first apply — this is a "weekend v1" raw-SQL migration set, not a tracked migration framework, so re-running an already-applied file will error on things like `CREATE TABLE`). Optionally follow with `railway run python seed.py` to seed the 4 agents + sample tasks.
+6. Deploy. Railway builds via Nixpacks (auto-detected from `requirements.txt`) and starts the service with the command in `Procfile`/`railway.json`: `uvicorn app.main:app --host 0.0.0.0 --port $PORT`. The public URL appears under the service's **Settings → Networking → Public Networking** (Railway doesn't expose a public URL by default — generate one there if it isn't already).
+7. Confirm with `curl https://<your-railway-domain>/health` → `{"status": "ok"}`.
+
+I can't perform these steps myself — no Railway CLI or account access is available in this environment — but everything in the repo needed for the deploy to work (`Procfile`, `railway.json`, the `DATABASE_URL` normalization, CORS) is in place.
+
 ## Layout
 
 - `migrations/0001_initial_schema.sql` — agents, tasks, threads, messages, receipts, policy_rules
@@ -30,6 +42,7 @@ uvicorn app.main:app --reload
 - `app/council.py` — the state-driven trigger loop: after a task update, checks its state and calls whichever agent's turn is next (`contracted` → Engineering + Risk, `in_review` → Reviewer), then rechecks so a full cascade completes in one call. No scheduler, no polling — just direct function calls off the resulting state, logging (not raising) if one agent's turn fails so the rest of the cascade and the triggering request still succeed
 - `app/routers/tasks.py` — the task lifecycle endpoints (see below)
 - `app/routers/agents.py`, `app/routers/policy_rules.py` — plain CRUD
+- `Procfile`, `railway.json` — Railway deploy config (see below)
 
 ## Task lifecycle endpoints
 

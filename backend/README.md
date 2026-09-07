@@ -37,7 +37,7 @@ I can't perform these steps myself — no Railway CLI or account access is avail
 - `app/models.py` / `app/schemas.py` — SQLAlchemy models and Pydantic schemas
 - `app/state_machine.py` — valid task state transitions
 - `app/task_service.py` — the actual lifecycle logic (transitions, message posting, contract/review application), shared by the routers, the orchestrator, and council so a human's manual call and an agent's turn go through the identical, state-machine-enforced code path
-- `app/prompts.py` — loads each agent's system prompt from `../agents/system-prompts.md`
+- `app/prompts.py` — loads each agent's system prompt from `agents/system-prompts.md` (inside `backend/`, so it ships with Railway's `Root Directory=/backend` deploy)
 - `app/orchestrator.py` — one function per role (`run_pm`, `run_engineering`, `run_risk`, `run_reviewer`): loads that role's prompt, pulls the task + thread history, calls Claude, applies the result via `task_service`. Each call is one self-contained transaction (a single `db.commit()`)
 - `app/council.py` — the state-driven trigger loop: after a task update, checks its state and calls whichever agent's turn is next (`contracted` → Engineering + Risk, `in_review` → Reviewer), then rechecks so a full cascade completes in one call. No scheduler, no polling — just direct function calls off the resulting state, logging (not raising) if one agent's turn fails so the rest of the cascade and the triggering request still succeed
 - `app/routers/tasks.py` — the task lifecycle endpoints (see below)

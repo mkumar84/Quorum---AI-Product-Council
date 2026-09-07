@@ -1,4 +1,4 @@
-"""Loads the role-scoped system prompts from agents/system-prompts.md.
+"""Loads the role-scoped system prompts from backend/agents/system-prompts.md.
 
 Keeping the prompts in one markdown file (rather than duplicated into Python
 strings) means editing an agent's brief never risks the code and the
@@ -9,7 +9,12 @@ import re
 from functools import lru_cache
 from pathlib import Path
 
-PROMPTS_PATH = Path(__file__).resolve().parents[2] / "agents" / "system-prompts.md"
+# Resolved relative to this package's own location (app/ -> backend/ ->
+# backend/agents/), not the repo root: Railway's Root Directory=/backend
+# deploys only the backend/ subtree, so a path reaching above it (e.g. a
+# sibling repo-root agents/ dir) is absent in production even though it
+# resolves fine in local dev - this bit us with a FileNotFoundError there.
+PROMPTS_PATH = Path(__file__).resolve().parent.parent / "agents" / "system-prompts.md"
 
 ROLE_TO_HEADING = {
     "pm": "PM Agent",

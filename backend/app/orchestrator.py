@@ -322,17 +322,27 @@ def run_risk(db: Session, task: models.Task) -> models.Message:
 
 
 REVIEW_FORMAT_INSTRUCTION = (
-    "\nRespond starting with exactly one of these first lines: 'VERDICT: APPROVED' or "
-    "'VERDICT: REJECTED'.\nIf REJECTED, the second line must be exactly 'REJECTED_TO: <role>' "
+    "\nRespond starting with exactly one of these first lines: 'VERDICT: APPROVED', "
+    "'VERDICT: REJECTED', or 'VERDICT: PROHIBITED'.\n"
+    "Use PROHIBITED only when policy_tier is 'prohibited' and the contract, as scoped, can never "
+    "be approved regardless of any sign-off - this is a permanent closure, not a request for "
+    "revision. There is no agent to send it back to; the only way forward is a materially "
+    "different contract (a new task), not a revision of this one. If you find yourself writing "
+    "'cannot proceed until sign-off is obtained' or anything conditional on approval, that is "
+    "REJECTED/approval_required language, not PROHIBITED - use PROHIBITED only for a genuinely "
+    "unwaivable block.\n"
+    "If REJECTED, the second line must be exactly 'REJECTED_TO: <role>' "
     "where <role> is one of pm, engineering_lead, risk_governance - whichever agent's work "
-    "needs to change - followed by your reason.\nIf APPROVED, follow with a fenced ```json "
+    "needs to change - followed by your reason.\nIf PROHIBITED, follow with your reason for why "
+    "no revision path exists.\nIf APPROVED, follow with a fenced ```json "
     "code block whose keys are objective, changed, verified, not_verified, risks, "
     "approval_needed (each a string or list of strings)."
 )
 
 
 def run_reviewer(db: Session, task: models.Task) -> models.Message:
-    """in_review -> approved (+ receipt) | in_progress (rejected, bounced to an agent)."""
+    """in_review -> approved (+ receipt) | in_progress (rejected, bounced to an agent for revision)
+    | rejected (prohibited, permanently closed - no revision path)."""
     _require_state(task, "in_review")
     agent = task_service.get_agent_by_role(db, "reviewer")
     try:
@@ -342,7 +352,9 @@ def run_reviewer(db: Session, task: models.Task) -> models.Message:
     except _Blocked as blocked:
         return blocked.message
     lines = reply.strip().splitlines()
-    approved = bool(lines) and lines[0].strip().upper().startswith("VERDICT: APPROVED")
+    first_line = lines[0].strip().upper() if lines else ""
+    approved = first_line.startswith("VERDICT: APPROVED")
+    prohibited = first_line.startswith("VERDICT: PROHIBITED")
 
     if approved:
         task_service.apply_transition(db, task, "approved")
@@ -370,6 +382,17 @@ def run_reviewer(db: Session, task: models.Task) -> models.Message:
             db,
             task,
             schemas.MessageCreate(author_type="agent", author_id=agent.id, message_type="receipt", content=reply),
+        )
+    elif prohibited:
+        # Permanent closure: no agent to bounce it back to, no revision expected of this
+        # contract. Distinct from the ordinary reject path below specifically so
+        # task.state alone can't be mistaken for "cleared to build" (approved) or
+        # "will be revised and resubmitted" (in_progress) - see state_machine.py.
+        task_service.apply_transition(db, task, "rejected")
+        message = task_service.post_message(
+            db,
+            task,
+            schemas.MessageCreate(author_type="agent", author_id=agent.id, message_type="critique", content=reply),
         )
     else:
         rejected_to_agent_id = None

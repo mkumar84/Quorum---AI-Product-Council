@@ -129,7 +129,11 @@ class RejectionRoutingTest(unittest.TestCase):
 
     def test_real_pm_revision_with_correct_resolves_id_advances_to_in_review(self):
         """PM can now be re-invoked (state == 'in_progress' is allowed), and its
-        revised, correctly-linked contract is what actually clears the rejection."""
+        revised, correctly-linked contract is what actually clears the rejection -
+        but since the task was already tiered 'auto' before this amendment, the
+        amendment resets the tier and holds the task at in_progress rather than
+        certifying Risk's stale decision; only Risk's fresh re-tier reaches
+        in_review (see test_policy_tier_reset.py for the full amendment story)."""
 
         def fake_call_claude(system_prompt, user_content):
             payload = {
@@ -154,10 +158,23 @@ class RejectionRoutingTest(unittest.TestCase):
         self.assertEqual(message.author_id, self.pm.id)
 
         self.db.refresh(self.task)
-        self.assertEqual(self.task.state, "in_review")
+        self.assertEqual(
+            self.task.state, "in_progress", "amending an already-tiered contract must hold for Risk to re-tier"
+        )
+        self.assertIsNone(self.task.policy_tier, "the stale 'auto' tier must be reset by the amendment")
         self.assertIsNone(self.task.rejected_to_agent_id)
         self.assertIsNone(self.task.pending_critique_message_id)
         self.assertIn("loaded/rendered rows", self.task.objective)
+
+        def fake_risk_reply(system_prompt, user_content):
+            return "TIER: auto\n\nre-tier: amendment only clarifies which rows are in scope"
+
+        with mock.patch.object(orchestrator, "_call_claude", side_effect=fake_risk_reply):
+            orchestrator.run_risk(self.db, self.task)
+
+        self.db.refresh(self.task)
+        self.assertEqual(self.task.state, "in_review", "Risk's fresh decision is what actually reaches review now")
+        self.assertEqual(self.task.policy_tier, "auto")
 
     def test_pm_clarifying_question_alone_does_not_resolve_the_rejection(self):
         """A second PM 'critique' (still needs clarification) links to the same

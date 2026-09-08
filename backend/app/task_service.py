@@ -52,6 +52,14 @@ def post_message(db: Session, task: models.Task, payload: schemas.MessageCreate)
                 f"the critique message that caused it ({task.pending_critique_message_id})"
             ),
         )
+    if payload.message_type == "contract" and task.policy_tier is not None:
+        # A contract amendment invalidates whatever tier Risk assigned to the
+        # prior text - that decision was never made against this version of
+        # the contract. Reset it so advance_to_review_if_ready's existing
+        # policy_tier-is-set gate forces a fresh Risk turn before this can
+        # reach in_review, rather than letting the Reviewer certify a tier
+        # nobody actually re-checked (the HQ-102 gap).
+        task.policy_tier = None
     message = models.Message(thread_id=task.thread_id, **payload.model_dump())
     db.add(message)
     db.flush()  # populate message.id now - callers often need it immediately (e.g. to
@@ -101,6 +109,13 @@ def advance_to_review_if_ready(db: Session, task: models.Task) -> None:
             return
         task.rejected_to_agent_id = None
         task.pending_critique_message_id = None
+        if task.policy_tier is None:
+            # The resolving message was a contract amendment that reset the
+            # tier (see post_message) - the rejection is cleared, but this
+            # must wait for Risk's fresh decision before in_review, same as
+            # a first-time contract. Falls through to the tier gate below on
+            # Risk's next turn rather than certifying a tier no one re-checked.
+            return
         apply_transition(db, task, "in_review")
         return
 
